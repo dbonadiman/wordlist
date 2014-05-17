@@ -90,3 +90,6 @@ class Generator(object):
                                                      prev=num+1)
                     for word in gen:
                         yield word
+
+    def generate_with_regex(self, regex):
+        raise NotImplementedError()
