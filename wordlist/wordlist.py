@@ -25,7 +25,7 @@ class Generator(object):
     """
     Wordlist class is the wordlist itself, will do the job
     """
-    def __init__(self, charset, delimiter=''):
+    def __init__(self, charset='a-z0-9', delimiter=''):
         self.charset = parse_charset(charset)
         self.delimiter = delimiter
 
@@ -91,5 +91,13 @@ class Generator(object):
                     for word in gen:
                         yield word
 
-    def generate_with_regex(self, regex):
-        raise NotImplementedError()
+    def generate_with_regex(self, regex, max=10):
+        """
+        Simple regex match on the generate function
+        TODO: built an hand crafted regex generator
+        """
+        import re
+        regex = re.compile('^'+regex+'$')
+        for word in self.generate(1, max):
+            if regex.match(word):
+                yield word
