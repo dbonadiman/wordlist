@@ -49,7 +49,8 @@ def main():
         else:
             filedesc.writelines(wrdlst.generate(minlen, maxlen))
     finally:
-        filedesc.close()
+        if args['out'] is not None:
+            filedesc.close()
 
 if __name__ == '__main__':
 
