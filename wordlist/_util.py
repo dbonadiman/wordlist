@@ -36,10 +36,15 @@ def parse_charset(charset):
     return charset
 
 
-def scan_pattern(string):
+def get_pattern_length(string):
     """
-    Scans the pattern in the form @@@a@@ returning an OrderedDict
-    containing the position of the fixed characters.
+    Determines the number of characters to be filled in the pattern
     """
-    res = OrderedDict([(i, x) for i, x in enumerate(string) if x != '@'])
-    return res
+    return string.count("@")
+
+
+def pattern_to_fstring(string):
+    """
+    Determines the number of characters to be filled in the pattern
+    """
+    return string.replace("@", "{}")

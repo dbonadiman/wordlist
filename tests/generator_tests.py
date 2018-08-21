@@ -16,8 +16,6 @@ def test_generate():
         next(c)
 
 
-
-
 def test_generate_2():
     print("testing wordlist.Generator(\"ab\").generate(2, 2)")
     gen = wordlist.Generator("ab")

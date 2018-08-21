@@ -1,16 +1,25 @@
 Wordlist
 ========
 
-[![Build Status](https://travis-ci.org/dbonadiman/wordlist.svg?branch=master)](https://travis-ci.org/dbonadiman/wordlist)
-[![Coverage Status](https://coveralls.io/repos/dbonadiman/wordlist/badge.png?branch=master)](https://coveralls.io/r/dbonadiman/wordlist?branch=master)
-[![Requirements Status](https://requires.io/github/dbonadiman/wordlist/requirements.png?branch=master)](https://requires.io/github/dbonadiman/wordlist/requirements/?branch=master)
-
 
 Generates all possible permutations of a given charset.
 
 Developed by [Alex Pellegrini](https://github.com/rexos).
 
 Code and performance optimisation by [Daniele Bonadiman](https://github.com/dbonadiman).
+
+
+Continuous integration status:
+
+[![Build Status](https://travis-ci.org/dbonadiman/wordlist.svg?branch=master)](https://travis-ci.org/dbonadiman/wordlist)
+[![Coverage Status](https://coveralls.io/repos/dbonadiman/wordlist/badge.png?branch=master)](https://coveralls.io/r/dbonadiman/wordlist?branch=master)
+[![Requirements Status](https://requires.io/github/dbonadiman/wordlist/requirements.png?branch=master)](https://requires.io/github/dbonadiman/wordlist/requirements/?branch=master)
+
+Pypi status:
+
+[![PyPi version](https://img.shields.io/pypi/v/wordlist.svg)](https://crate.io/packages/wordlist/)
+[![PyPi downloads](https://img.shields.io/pypi/dm/wordlist.svg)](https://crate.io/packages/wordlist/)
+
 
 ## Installing:
 
@@ -77,10 +86,11 @@ There are to ways to pass the charset to the script:
 #### Pattern
 The pattern should be like:
 
-`@@q@@er@t@y`
+`@@q@er@t@y`
 
-The script will replace every `@` symbol with every letter in the charset so as to get every possible
+The script will replace every `{}` symbol with every letter in the charset so as to get every possible
 permutation. Every other symbol will be a fixed character present in every string. In this example, every generated string will contain a `q` at the 3rd position an `e` at the 6th and so on.
+
 
 ## Contributing
 
