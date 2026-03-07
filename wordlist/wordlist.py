@@ -1,59 +1,41 @@
-# -*- coding: utf-8 -*-
-############################################
-#                                          #
-# Wordlist generator, creates dictionaries #
-# Developed by rexos.                      #
-# Code and performance optimisation by     #
-# dbonadiman.                              #
-#                                          #
-############################################
-"""Wordlist
+"""Core generator API for the wordlist package."""
 
-Generates all possible permutations of a given charset.
-"""
-
-from __future__ import print_function
+from __future__ import annotations
 
 from itertools import product
+from typing import Iterator
 
 import wordlist._util as utils
 
 
-class Generator(object):
-    """
-    Wordlist class is the wordlist itself, will do the job
-    """
-    def __init__(self, charset, delimiter=''):
+class Generator:
+    """Generate all permutations for a given charset and length/pattern."""
+
+    def __init__(self, charset: str, delimiter: str = "") -> None:
         self.charset = utils.parse_charset(charset)
         self.delimiter = delimiter
 
-    def generate(self, minlen, maxlen):
-        """
-        Generates words of different length without storing
-        them into memory, enforced by itertools.product
-        """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError()
+    def generate(self, minlen: int, maxlen: int) -> Iterator[str]:
+        """Yield all generated words whose length is between *minlen* and *maxlen*."""
+        if minlen < 1:
+            raise ValueError("minlen must be >= 1")
+        if maxlen < minlen:
+            raise ValueError("maxlen must be >= minlen")
 
         for cur in range(minlen, maxlen + 1):
-            # string product generator
-            str_generator = product(self.charset, repeat=cur)
-            for each in str_generator:
-                # yield the produced word
-                yield ''.join(each)+self.delimiter
+            for each in product(self.charset, repeat=cur):
+                yield "".join(each) + self.delimiter
 
-    def generate_with_pattern(self, pattern=None):
-        """
-        Algorithm that creates the list
-        based on a given pattern
-        The pattern must be like string format patter:
-        e.g: a@b will match an 'a' follow by any character follow by a 'b'
-        """
+    def generate_with_pattern(self, pattern: str | None = None) -> Iterator[str]:
+        """Yield all generated words that match *pattern*.
 
-        curlen = utils.get_pattern_length(pattern)
-        if curlen > 0:
-            str_generator = product(self.charset, repeat=curlen)
-            pattern = pattern + self.delimiter
-            fstring = utils.pattern_to_fstring(pattern)
-            for each in str_generator:
-                yield fstring.format(*each)
+        ``@`` placeholders are replaced by characters from the configured charset.
+        """
+        placeholder_count = utils.get_pattern_length(pattern)
+        if placeholder_count == 0:
+            return
+
+        pattern = (pattern or "") + self.delimiter
+        fstring = utils.pattern_to_fstring(pattern)
+        for each in product(self.charset, repeat=placeholder_count):
+            yield fstring.format(*each)

@@ -1,50 +1,53 @@
-""".util
-is a private module containing utility
-used for the actual implementation of
-the wordlist generator
-"""
+"""Utility helpers for :mod:`wordlist`."""
 
-from collections import OrderedDict
+from __future__ import annotations
 
 
-def char_range(starting_char, ending_char):
+def char_range(starting_char: str, ending_char: str):
+    """Yield characters from *starting_char* to *ending_char* (inclusive)."""
+    if not isinstance(starting_char, str) or not isinstance(ending_char, str):
+        raise TypeError("starting_char and ending_char must be strings")
+    if len(starting_char) != 1 or len(ending_char) != 1:
+        raise ValueError("starting_char and ending_char must be a single character")
+
+    start = ord(starting_char)
+    stop = ord(ending_char)
+    step = 1 if start <= stop else -1
+    for codepoint in range(start, stop + step, step):
+        yield chr(codepoint)
+
+
+def parse_charset(charset: str) -> str:
+    """Expand range expressions (for example ``a-z``) in *charset*.
+
+    Any standalone characters are kept as-is.
     """
-    Create a range generator for chars
-    """
-    assert isinstance(starting_char, str), 'char_range: Wrong argument/s type'
-    assert isinstance(ending_char, str), 'char_range: Wrong argument/s type'
+    if not isinstance(charset, str):
+        raise TypeError("charset must be a string")
 
-    for char in range(ord(starting_char), ord(ending_char) + 1):
-        yield chr(char)
+    chars: list[str] = []
+    i = 0
+    while i < len(charset):
+        if i + 2 < len(charset) and charset[i + 1] == "-":
+            chars.extend(char_range(charset[i], charset[i + 2]))
+            i += 3
+            continue
 
+        chars.append(charset[i])
+        i += 1
 
-def parse_charset(charset):
-    """
-    Finds out whether there are intervals to expand and
-    creates the charset
-    """
-    import re
-    regex = r'(\w-\w)'
-    pat = re.compile(regex)
-    found = pat.findall(charset)
-    result = ''
-    if found:
-        for element in found:
-            for char in char_range(element[0], element[-1]):
-                result += char
-        return result
-    return charset
+    return "".join(chars)
 
 
-def get_pattern_length(string):
-    """
-    Determines the number of characters to be filled in the pattern
-    """
+def get_pattern_length(string: str | None) -> int:
+    """Return how many substitution markers (``@``) are in *string*."""
+    if not string:
+        return 0
     return string.count("@")
 
 
-def pattern_to_fstring(string):
-    """
-    Determines the number of characters to be filled in the pattern
-    """
+def pattern_to_fstring(string: str) -> str:
+    """Convert the ``@`` placeholder syntax to a format-string syntax."""
+    if not isinstance(string, str):
+        raise TypeError("string must be a str")
     return string.replace("@", "{}")

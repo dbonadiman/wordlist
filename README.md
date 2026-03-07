@@ -17,8 +17,8 @@ Continuous integration status:
 
 Pypi status:
 
-[![PyPi version](https://img.shields.io/pypi/v/wordlist.svg)](https://crate.io/packages/wordlist/)
-[![PyPi downloads](https://img.shields.io/pypi/dm/wordlist.svg)](https://crate.io/packages/wordlist/)
+[![PyPi version](https://img.shields.io/pypi/v/wordlist.svg)](https://pypi.org/project/wordlist/)
+[![PyPi downloads](https://img.shields.io/pypi/dm/wordlist.svg)](https://pypi.org/project/wordlist/)
 
 
 ## Installing:
@@ -98,7 +98,7 @@ permutation. Every other symbol will be a fixed character present in every strin
 $ git clone https://github.com/rexos/wordlist.git
 $ cd wordlist
 $ pip install -r requirements.txt
-$ nosetests
+$ pytest
 ```
 
 And open a pull request!
