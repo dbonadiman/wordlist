@@ -8,10 +8,19 @@ should fall back to the portable pure-Python path.
 The fast path is only taken when the extension is available *and* the
 charset, delimiter and pattern are pure ASCII, so it can never change the
 bytes that would otherwise be produced.
+
+Note on threads: the extension also exposes ``write_words_parallel`` /
+``write_pattern_parallel`` (POSIX only).  They are not used here: the
+serial generator builds output by memcpy doubling at near memory
+bandwidth (~20+ GB/s), far faster than the kernel can copy one file's
+data into the page cache (~3-4 GB/s).  Single-file output is therefore
+write-bound, and splitting it across threads writing the same file only
+adds inode-lock contention (measured ~0.85x of serial).  The parallel
+entry points remain available for callers that can avoid that contention
+(separate files, O_DIRECT).
 """
 
 import os
-import stat
 
 try:
     from wordlist import _speedups
@@ -19,11 +28,6 @@ try:
 except Exception:  # pragma: no cover - extension is optional
     _speedups = None
     available = False
-
-# Only spread work across threads once the job is big enough to pay for it.
-_PARALLEL_MIN_BYTES = 8 << 20
-# Cap the worker count; more threads quickly saturate storage bandwidth.
-_PARALLEL_MAX_THREADS = 8
 
 # Escape hatch: set WORDLIST_NO_C=1 to force the pure-Python path even when
 # the compiled accelerator is installed (useful for testing/benchmarking).
@@ -51,35 +55,6 @@ def _fileno(fileobj):
     return fd
 
 
-def _parallel_enabled():
-    return available and getattr(_speedups, 'has_parallel', 0)
-
-
-def _nthreads():
-    count = os.cpu_count() or 1
-    return min(count, _PARALLEL_MAX_THREADS)
-
-
-def _seekable_regular(fd):
-    """True if fd refers to a regular file (so pwrite at offsets is safe)."""
-    try:
-        return stat.S_ISREG(os.fstat(fd).st_mode)
-    except OSError:
-        return False
-
-
-def _est_words_bytes(k, dlen, minlen, maxlen):
-    total = 0
-    for length in range(minlen, maxlen + 1):
-        total += (k ** length) * (length + dlen)
-    return total
-
-
-def _should_parallelize(fd, estimate, nthreads):
-    return (_parallel_enabled() and nthreads > 1
-            and estimate >= _PARALLEL_MIN_BYTES and _seekable_regular(fd))
-
-
 def write_words(fileobj, charset, delimiter, minlen, maxlen):
     """Stream every word of length minlen..maxlen to fileobj via C.
 
@@ -95,19 +70,8 @@ def write_words(fileobj, charset, delimiter, minlen, maxlen):
     # Flush any buffered Python-level writes so our direct fd writes do
     # not get reordered ahead of them.
     fileobj.flush()
-    cset = charset.encode('ascii')
-    delim = delimiter.encode('ascii')
-    nthreads = _nthreads()
-    if _should_parallelize(
-            fd, _est_words_bytes(len(cset), len(delim), minlen, maxlen),
-            nthreads):
-        try:
-            _speedups.write_words_parallel(fd, cset, delim, minlen, maxlen,
-                                           nthreads)
-            return True
-        except OverflowError:
-            pass  # offsets too large; fall back to the serial path
-    _speedups.write_words(fd, cset, delim, minlen, maxlen)
+    _speedups.write_words(fd, charset.encode('ascii'),
+                          delimiter.encode('ascii'), minlen, maxlen)
     return True
 
 
@@ -124,16 +88,6 @@ def write_pattern(fileobj, charset, delimiter, pattern):
     if fd is None:
         return False
     fileobj.flush()
-    cset = charset.encode('ascii')
-    delim = delimiter.encode('ascii')
-    pat = pattern.encode('ascii')
-    nthreads = _nthreads()
-    estimate = (len(cset) ** pat.count(b'@')) * (len(pat) + len(delim))
-    if _should_parallelize(fd, estimate, nthreads):
-        try:
-            _speedups.write_pattern_parallel(fd, cset, delim, pat, nthreads)
-            return True
-        except OverflowError:
-            pass  # offsets too large; fall back to the serial path
-    _speedups.write_pattern(fd, cset, delim, pat)
+    _speedups.write_pattern(fd, charset.encode('ascii'),
+                            delimiter.encode('ascii'), pattern.encode('ascii'))
     return True

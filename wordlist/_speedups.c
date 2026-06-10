@@ -31,22 +31,16 @@
 #define WL_SLACK 8
 
 /*
- * Copy `width` bytes from src to dst, rounding the work up to whole
- * 8-byte stores.  src must have >= WL_SLACK padding and dst must have
- * >= WL_SLACK slack past the logical end of the buffer.  The few extra
- * bytes are either overwritten by the following row or left unused in
- * the buffer tail (never flushed), so this stays correct while letting
- * the compiler emit single-instruction stores for the common short row.
+ * Output sink: lets the product builder serve both the serial path
+ * (sequential writes, GIL held) and the parallel path (pwrite at an
+ * advancing offset, GIL released).  Returns 0 on success, -1 on failure.
  */
-static inline void
-wl_copy(char *dst, const char *src, size_t width)
-{
-    size_t i = 0;
-    do {
-        memcpy(dst + i, src + i, 8);
-        i += 8;
-    } while (i < width);
-}
+typedef int (*wl_sink_fn)(void *ctx, const char *buf, size_t len);
+
+typedef struct { int fd; } wl_serial_ctx;
+
+/* Parallel sink: pwrite at an advancing absolute offset (GIL released). */
+typedef struct { int fd; off_t offset; int err; } wl_pwrite_ctx;
 
 /* Write the first `len` bytes of `buf` to `fd`, retrying short writes. */
 static int
@@ -67,107 +61,142 @@ wl_flush(int fd, const char *buf, size_t len)
     return 0;
 }
 
+static int
+wl_sink_serial(void *ctx, const char *buf, size_t len)
+{
+    return wl_flush(((wl_serial_ctx *) ctx)->fd, buf, len);
+}
+
 /*
- * Emit the full cartesian product described by a pre-filled row template.
+ * Build the cartesian product into `out` and stream it through `sink`.
  *
- *   row      : template of `width` bytes, with fixed positions already set
- *              and each variable position initialised to charset[0].
- *   varoff   : byte offsets inside `row` of the `nvar` variable positions,
- *              left to right (left-most is the most significant digit).
- *   charset  : `k` single-byte characters.
+ *   row     : width-byte template; fixed bytes set, every variable
+ *             position initialised to charset[0].
+ *   varoff  : offsets of the `nvar` variable positions, ascending
+ *             (left-most is the most significant digit).
  *
- * Rows are produced in the same lexicographic order as
- * itertools.product (right-most variable position changes fastest) and
- * appended to `out`, which is flushed to `fd` as it fills.
+ * Strategy: materialise the right-most `m` variable positions once as a
+ * "suffix block" using recursive memcpy doubling -- so most output bytes
+ * are replicated at memory-bandwidth speed instead of being generated a
+ * row at a time -- where `m` is the largest count whose block fits
+ * `bufsize`.  Then walk the remaining "prefix" positions like an
+ * odometer, stamping only the changed prefix column into the block and
+ * flushing it; the suffix bytes are never recomputed.
+ *
+ * Rows are produced in the same lexicographic order as itertools.product.
+ * Returns 0, -1 (sink failure) or -2 (out of memory).
  */
 static int
-wl_emit(int fd, char *out, size_t bufsize, size_t *outlen_io,
-        char *row, size_t width,
-        const Py_ssize_t *varoff, Py_ssize_t nvar,
-        const char *charset, Py_ssize_t k)
+wl_emit_core(char *out, size_t bufsize, const char *row, size_t width,
+             const Py_ssize_t *varoff, Py_ssize_t nvar,
+             const char *charset, Py_ssize_t k,
+             wl_sink_fn sink, void *ctx)
 {
-    Py_ssize_t *idx;
-    size_t outlen = *outlen_io;
-    int rc = 0;
+    Py_ssize_t m, nprefix, s, j;
+    size_t rows, blk, r;
 
     if (nvar > 0 && k <= 0) {
-        /* a variable position with an empty charset yields nothing */
-        return 0;
+        return 0;  /* variable position with empty charset: no output */
     }
-
     if (nvar == 0) {
-        /* no variable positions: a single row */
-        if (outlen + width > bufsize) {
-            if (outlen && wl_flush(fd, out, outlen) < 0) {
-                return -1;
-            }
-            outlen = 0;
-        }
-        wl_copy(out + outlen, row, width);
-        *outlen_io = outlen + width;
-        return 0;
+        memcpy(out, row, width);
+        return sink(ctx, out, width);
     }
 
-    idx = (Py_ssize_t *) PyMem_Calloc(nvar, sizeof(Py_ssize_t));
-    if (idx == NULL) {
-        PyErr_NoMemory();
-        return -1;
+    /* Largest m with k^m * width <= bufsize (at least 1, since
+     * bufsize >= k * width by construction). */
+    m = 0;
+    rows = 1;
+    while (m < nvar && rows * (size_t) k * width <= bufsize) {
+        rows *= (size_t) k;
+        m++;
+    }
+
+    /* Build the suffix block for varoff[nvar-m .. nvar-1] by doubling. */
+    memcpy(out, row, width);
+    rows = 1;
+    for (s = nvar - 1; s >= nvar - m; s--) {
+        Py_ssize_t p = varoff[s];
+        size_t bsz = rows * width;
+        for (j = 1; j < k; j++) {
+            memcpy(out + (size_t) j * bsz, out, bsz);
+        }
+        for (j = 1; j < k; j++) {
+            char ch = charset[j];
+            char *col = out + (size_t) j * bsz + p;
+            for (r = 0; r < rows; r++) {
+                col[r * width] = ch;
+            }
+        }
+        rows *= (size_t) k;
+    }
+    blk = rows * width;
+
+    nprefix = nvar - m;
+    if (nprefix == 0) {
+        return sink(ctx, out, blk);
     }
 
     {
-        /*
-         * Emit the inner-most variable position as a tight burst of `k`
-         * rows (it just cycles through the charset with no carry), then
-         * advance the remaining positions once per burst.  This keeps the
-         * odometer and the buffer-space check off the hot per-row path.
-         */
-        Py_ssize_t inner = varoff[nvar - 1];
-        size_t burst = (size_t) k * width;
-
+        Py_ssize_t *idx = (Py_ssize_t *) calloc((size_t) nprefix,
+                                                sizeof(Py_ssize_t));
+        int rc = 0;
+        if (idx == NULL) {
+            return -2;
+        }
         for (;;) {
-            char *dst;
-            Py_ssize_t j, pos;
-
-            if (outlen + burst > bufsize) {
-                if (outlen && wl_flush(fd, out, outlen) < 0) {
-                    rc = -1;
-                    goto done;
-                }
-                outlen = 0;
+            Py_ssize_t pos;
+            rc = sink(ctx, out, blk);
+            if (rc) {
+                break;
             }
-            dst = out + outlen;
-            for (j = 0; j < k; j++) {
-                /* Copy the stable template, then stamp the inner byte into
-                 * the destination.  Keeping the template unmutated avoids a
-                 * store-to-load forwarding stall on the hot path. */
-                wl_copy(dst, row, width);
-                dst[inner] = charset[j];
-                dst += width;
-            }
-            outlen += burst;
-
-            /* carry into the positions above the inner one */
-            pos = nvar - 2;
+            /* Odometer over the prefix positions; stamp the changed
+             * column across every row of the reused suffix block. */
+            pos = nprefix - 1;
             while (pos >= 0) {
+                Py_ssize_t p = varoff[pos];
+                char ch;
                 if (++idx[pos] < k) {
-                    row[varoff[pos]] = charset[idx[pos]];
+                    ch = charset[idx[pos]];
+                    for (r = 0; r < rows; r++) {
+                        out[r * width + p] = ch;
+                    }
                     break;
                 }
                 idx[pos] = 0;
-                row[varoff[pos]] = charset[0];
+                ch = charset[0];
+                for (r = 0; r < rows; r++) {
+                    out[r * width + p] = ch;
+                }
                 pos--;
             }
             if (pos < 0) {
-                break;  /* every higher digit wrapped: product exhausted */
+                break;
             }
         }
+        free(idx);
+        return rc;
     }
-
-    *outlen_io = outlen;
-done:
-    PyMem_Free(idx);
-    return rc;
 }
+
+/* Serial product emit: build and write sequentially to `fd`. */
+static int
+wl_emit(int fd, char *out, size_t bufsize, const char *row, size_t width,
+        const Py_ssize_t *varoff, Py_ssize_t nvar,
+        const char *charset, Py_ssize_t k)
+{
+    wl_serial_ctx ctx;
+    int rc;
+    ctx.fd = fd;
+    rc = wl_emit_core(out, bufsize, row, width, varoff, nvar, charset, k,
+                      wl_sink_serial, &ctx);
+    if (rc == -2) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    return rc;  /* 0 ok; -1 means the sink already raised */
+}
+
 
 /* Pick an output buffer that holds the default size and at least one burst. */
 static size_t
@@ -220,6 +249,19 @@ wl_pwrite_all(int fd, const char *buf, size_t len, off_t offset)
     return 0;
 }
 
+static int
+wl_sink_pwrite(void *ctx, const char *buf, size_t len)
+{
+    wl_pwrite_ctx *s = (wl_pwrite_ctx *) ctx;
+    int err = wl_pwrite_all(s->fd, buf, len, s->offset);
+    if (err) {
+        s->err = err;
+        return -1;
+    }
+    s->offset += (off_t) len;
+    return 0;
+}
+
 /*
  * Like wl_emit but writes via pwrite at an absolute offset and makes no
  * Python C-API calls (the caller has released the GIL).  Iterates the
@@ -232,73 +274,20 @@ wl_emit_pwrite(int fd, off_t offset, char *buf, size_t bufsize,
                const Py_ssize_t *varoff, Py_ssize_t nvar,
                const char *charset, Py_ssize_t k)
 {
-    size_t outlen = 0;
-    Py_ssize_t *idx;
-    int err = 0;
-
-    if (nvar == 0) {
-        wl_copy(buf, row, width);
-        return wl_pwrite_all(fd, buf, width, offset);
-    }
-    if (k <= 0) {
-        return 0;
-    }
-
-    idx = (Py_ssize_t *) calloc((size_t) nvar, sizeof(Py_ssize_t));
-    if (idx == NULL) {
+    wl_pwrite_ctx ctx;
+    int rc;
+    ctx.fd = fd;
+    ctx.offset = offset;
+    ctx.err = 0;
+    rc = wl_emit_core(buf, bufsize, row, width, varoff, nvar, charset, k,
+                      wl_sink_pwrite, &ctx);
+    if (rc == -2) {
         return ENOMEM;
     }
-
-    {
-        Py_ssize_t inner = varoff[nvar - 1];
-        size_t burst = (size_t) k * width;
-
-        for (;;) {
-            char *dst;
-            Py_ssize_t j, pos;
-
-            if (outlen + burst > bufsize) {
-                if (outlen) {
-                    err = wl_pwrite_all(fd, buf, outlen, offset);
-                    if (err) {
-                        goto done;
-                    }
-                    offset += (off_t) outlen;
-                    outlen = 0;
-                }
-            }
-            dst = buf + outlen;
-            for (j = 0; j < k; j++) {
-                wl_copy(dst, row, width);
-                dst[inner] = charset[j];
-                dst += width;
-            }
-            outlen += burst;
-
-            pos = nvar - 2;
-            while (pos >= 0) {
-                if (++idx[pos] < k) {
-                    row[varoff[pos]] = charset[idx[pos]];
-                    break;
-                }
-                idx[pos] = 0;
-                row[varoff[pos]] = charset[0];
-                pos--;
-            }
-            if (pos < 0) {
-                break;
-            }
-        }
-        if (outlen) {
-            err = wl_pwrite_all(fd, buf, outlen, offset);
-            if (err) {
-                goto done;
-            }
-        }
+    if (rc < 0) {
+        return ctx.err ? ctx.err : EIO;
     }
-done:
-    free(idx);
-    return err;
+    return 0;
 }
 
 /* One product region to generate: its template, variable positions, and
@@ -471,7 +460,7 @@ py_write_words(PyObject *self, PyObject *args)
     const char *charset, *delim;
     Py_ssize_t k, dlen, minlen, maxlen;
     char *out = NULL;
-    size_t bufsize, outlen = 0, maxwidth;
+    size_t bufsize, maxwidth;
     Py_ssize_t cur;
 
     if (!PyArg_ParseTuple(args, "iy#y#nn", &fd, &charset, &k,
@@ -515,7 +504,7 @@ py_write_words(PyObject *self, PyObject *args)
             memcpy(row + cur, delim, (size_t) dlen);
         }
 
-        if (wl_emit(fd, out, bufsize, &outlen, row, width,
+        if (wl_emit(fd, out, bufsize, row, width,
                     varoff, cur, charset, k) < 0) {
             PyMem_Free(row);
             PyMem_Free(varoff);
@@ -526,10 +515,6 @@ py_write_words(PyObject *self, PyObject *args)
         PyMem_Free(varoff);
     }
 
-    if (outlen && wl_flush(fd, out, outlen) < 0) {
-        PyMem_Free(out);
-        return NULL;
-    }
     PyMem_Free(out);
     Py_RETURN_NONE;
 }
@@ -550,7 +535,7 @@ py_write_pattern(PyObject *self, PyObject *args)
     char *out = NULL, *row = NULL;
     Py_ssize_t *varoff = NULL;
     Py_ssize_t nvar = 0, i;
-    size_t width, bufsize, outlen = 0;
+    size_t width, bufsize;
 
     if (!PyArg_ParseTuple(args, "iy#y#y#", &fd, &charset, &k,
                           &delim, &dlen, &pattern, &plen)) {
@@ -595,11 +580,8 @@ py_write_pattern(PyObject *self, PyObject *args)
         return PyErr_NoMemory();
     }
 
-    if (wl_emit(fd, out, bufsize, &outlen, row, width,
+    if (wl_emit(fd, out, bufsize, row, width,
                 varoff, nvar, charset, k) < 0) {
-        goto error;
-    }
-    if (outlen && wl_flush(fd, out, outlen) < 0) {
         goto error;
     }
 
