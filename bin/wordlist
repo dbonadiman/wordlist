@@ -42,12 +42,15 @@ def main():
             filedesc = open(args['out'], 'w')
 
         wrdlst = wordlist.Generator(charset, '\n')
-        # if a pattern is given generate the list based on it
+        # if a pattern is given generate the list based on it.
+        # The *_blocks generators yield large concatenated chunks instead
+        # of single words, which streams to disk/stdout far faster while
+        # producing byte-identical output.
         if pattern:
-            filedesc.writelines(wrdlst.generate_with_pattern(pattern))
+            filedesc.writelines(wrdlst.generate_with_pattern_blocks(pattern))
         # generate normally otherwise
         else:
-            filedesc.writelines(wrdlst.generate(minlen, maxlen))
+            filedesc.writelines(wrdlst.generate_blocks(minlen, maxlen))
     finally:
         filedesc.close()
 
