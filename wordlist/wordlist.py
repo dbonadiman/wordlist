@@ -111,6 +111,14 @@ def _pattern_pools(charset, pattern, delimiter):
     return pools
 
 
+def _check_range(minlen, maxlen):
+    """Validate a length range, raising ValueError with a helpful message."""
+    if minlen < 1 or maxlen < minlen:
+        raise ValueError(
+            'length range must satisfy 1 <= minlen <= maxlen '
+            '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+
+
 class Generator(object):
     """
     Wordlist class is the wordlist itself, will do the job
@@ -128,10 +136,7 @@ class Generator(object):
         Computed in closed form -- nothing is enumerated -- so it is
         instant even for ranges far too large to ever materialise.
         """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError(
-                'length range must satisfy 1 <= minlen <= maxlen '
-                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        _check_range(minlen, maxlen)
         k = len(self.charset)
         dlen = len(self.delimiter)
         words = 0
@@ -162,10 +167,7 @@ class Generator(object):
         product as a constant trailing pool so each word is built by a
         single C-level ``str.join`` with no per-word concatenation.
         """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError(
-                'length range must satisfy 1 <= minlen <= maxlen '
-                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        _check_range(minlen, maxlen)
 
         charset = self.charset
         delimiter = self.delimiter
@@ -184,10 +186,7 @@ class Generator(object):
         result is streamed straight to a file or stdout.  Memory stays
         bounded by ``_BLOCK_WORDS``.
         """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError(
-                'length range must satisfy 1 <= minlen <= maxlen '
-                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        _check_range(minlen, maxlen)
 
         charset = self.charset
         delimiter = self.delimiter
@@ -236,10 +235,7 @@ class Generator(object):
         are pure ASCII; otherwise falls back to the portable block
         generator.  Either way the bytes produced are identical.
         """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError(
-                'length range must satisfy 1 <= minlen <= maxlen '
-                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        _check_range(minlen, maxlen)
         if not _fast.write_words(fileobj, self.charset, self.delimiter,
                                  minlen, maxlen):
             fileobj.writelines(self.generate_blocks(minlen, maxlen))
@@ -269,10 +265,7 @@ class Generator(object):
         the whole output to ``paths[0]`` (leaving the rest empty) when the
         accelerator is unavailable or the charset is not pure ASCII.
         """
-        if minlen < 1 or maxlen < minlen:
-            raise ValueError(
-                'length range must satisfy 1 <= minlen <= maxlen '
-                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        _check_range(minlen, maxlen)
         if not paths:
             raise ValueError('need at least one shard path')
         if nthreads is None:

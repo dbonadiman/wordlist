@@ -421,6 +421,27 @@ wl_mul_ovf(size_t a, size_t b, size_t *out)
     return 0;
 }
 
+/*
+ * For a region with `nvars` variable positions and rows of `width`
+ * bytes, compute the bytes produced per first-variable value
+ * (k^(nvars-1) * width) and the whole-region size (that * k).  Returns
+ * non-zero if any of the products overflow size_t.
+ */
+static int
+wl_slab_size(Py_ssize_t k, Py_ssize_t nvars, size_t width,
+             size_t *subslab, size_t *region)
+{
+    size_t pw = 1;
+    Py_ssize_t i;
+    for (i = 0; i < nvars - 1; i++) {
+        if (wl_mul_ovf(pw, (size_t) k, &pw)) {
+            return 1;
+        }
+    }
+    return wl_mul_ovf(pw, width, subslab)
+        || wl_mul_ovf(*subslab, (size_t) k, region);
+}
+
 static void
 wl_free_specs(wl_spec *specs, Py_ssize_t n)
 {
@@ -442,6 +463,34 @@ wl_oserror(int err)
     errno = err;
     PyErr_SetFromErrno(PyExc_OSError);
     return NULL;
+}
+
+/*
+ * Run a populated wl_pjob across nthreads, then tear down the lock, free
+ * the specs, and translate the outcome into a Python return value.
+ * Always consumes job->specs.  Caller fills in everything except next
+ * and err.
+ */
+static PyObject *
+wl_pjob_finish(wl_pjob *job, int nthreads)
+{
+    int err;
+
+    job->next = 0;
+    job->err = 0;
+    if (pthread_mutex_init(&job->lock, NULL) != 0) {
+        wl_free_specs(job->specs, job->nspecs);
+        return wl_oserror(errno ? errno : EAGAIN);
+    }
+    wl_run_parallel(job, nthreads);
+    pthread_mutex_destroy(&job->lock);
+
+    err = job->err;
+    wl_free_specs(job->specs, job->nspecs);
+    if (err) {
+        return wl_oserror(err);
+    }
+    Py_RETURN_NONE;
 }
 
 #else
@@ -639,18 +688,12 @@ py_write_words_parallel(PyObject *self, PyObject *args)
     si = 0;
     for (cur = minlen; cur <= maxlen; cur++, si++) {
         size_t width = (size_t) cur + (size_t) dlen;
-        size_t pw = 1, subslab, region, burst;
+        size_t subslab, region, burst;
         Py_ssize_t i;
         char *templ;
         Py_ssize_t *varoff;
 
-        for (i = 0; i < cur - 1; i++) {          /* pw = k^(cur-1) */
-            if (wl_mul_ovf(pw, (size_t) k, &pw)) {
-                goto overflow;
-            }
-        }
-        if (wl_mul_ovf(pw, width, &subslab) ||
-            wl_mul_ovf(subslab, (size_t) k, &region) ||
+        if (wl_slab_size(k, cur, width, &subslab, &region) ||
             base > (size_t) -1 - region) {
             goto overflow;
         }
@@ -696,22 +739,8 @@ py_write_words_parallel(PyObject *self, PyObject *args)
     job.nspecs = nspecs;
     job.maxwidth = maxwidth;
     job.maxburst = maxburst;
-    job.next = 0;
     job.nunits = nspecs * k;
-    job.err = 0;
-    if (pthread_mutex_init(&job.lock, NULL) != 0) {
-        wl_free_specs(specs, nspecs);
-        return wl_oserror(errno ? errno : EAGAIN);
-    }
-
-    wl_run_parallel(&job, nthreads);
-    pthread_mutex_destroy(&job.lock);
-    wl_free_specs(specs, nspecs);
-
-    if (job.err) {
-        return wl_oserror(job.err);
-    }
-    Py_RETURN_NONE;
+    return wl_pjob_finish(&job, nthreads);
 
 overflow:
     wl_free_specs(specs, si);
@@ -730,7 +759,7 @@ py_write_pattern_parallel(PyObject *self, PyObject *args)
     int fd, nthreads;
     const char *charset, *delim, *pattern;
     Py_ssize_t k, dlen, plen, i, nvar = 0;
-    size_t width, pw = 1, subslab, region;
+    size_t width, subslab, region;
     char *templ;
     Py_ssize_t *varoff;
     wl_spec *specs;
@@ -773,13 +802,7 @@ py_write_pattern_parallel(PyObject *self, PyObject *args)
         Py_RETURN_NONE;
     }
 
-    for (i = 0; i < nvar - 1; i++) {             /* pw = k^(nvar-1) */
-        if (wl_mul_ovf(pw, (size_t) k, &pw)) {
-            goto overflow;
-        }
-    }
-    if (wl_mul_ovf(pw, width, &subslab) ||
-        wl_mul_ovf(subslab, (size_t) k, &region)) {
+    if (wl_slab_size(k, nvar, width, &subslab, &region)) {
         goto overflow;
     }
     (void) region;
@@ -804,22 +827,8 @@ py_write_pattern_parallel(PyObject *self, PyObject *args)
     job.nspecs = 1;
     job.maxwidth = width;
     job.maxburst = (size_t) k * width;
-    job.next = 0;
     job.nunits = k;
-    job.err = 0;
-    if (pthread_mutex_init(&job.lock, NULL) != 0) {
-        wl_free_specs(specs, 1);
-        return wl_oserror(errno ? errno : EAGAIN);
-    }
-
-    wl_run_parallel(&job, nthreads);
-    pthread_mutex_destroy(&job.lock);
-    wl_free_specs(specs, 1);
-
-    if (job.err) {
-        return wl_oserror(job.err);
-    }
-    Py_RETURN_NONE;
+    return wl_pjob_finish(&job, nthreads);
 
 overflow:
     free(templ);
