@@ -5,15 +5,21 @@ except ImportError:
     from distutils.core import setup, Extension
     _HAVE_SETUPTOOLS = False
 
+import sys
+
 import wordlist
 
 install_requires = []
+
+# Link pthreads for the parallel path on POSIX (no-op/needed-free on Windows).
+_ext_libraries = [] if sys.platform == 'win32' else ['pthread']
 
 # Optional C accelerator.  Marked optional so a missing compiler never
 # breaks installation -- the package falls back to the pure-Python path.
 speedups = Extension(
     'wordlist._speedups',
     sources=['wordlist/_speedups.c'],
+    libraries=_ext_libraries,
     optional=True,
 )
 

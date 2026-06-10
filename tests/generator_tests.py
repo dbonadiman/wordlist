@@ -153,3 +153,66 @@ def test_write_empty_pattern_writes_nothing():
     print("testing wordlist.Generator.write_with_pattern('') writes nothing")
     written = _write_to_file(wordlist.Generator("ab").write_with_pattern, '')
     assert_equals(written, '')
+
+
+def _parallel_speedups():
+    """Return the _speedups module if it offers the parallel path, else None."""
+    try:
+        from wordlist import _speedups
+    except ImportError:
+        return None
+    if not getattr(_speedups, 'has_parallel', 0):
+        return None
+    return _speedups
+
+
+def _run_parallel(call_name, charset, delim, *rest):
+    speedups = _parallel_speedups()
+    fd, path = tempfile.mkstemp()
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            getattr(speedups, call_name)(
+                handle.fileno(), charset.encode('ascii'),
+                delim.encode('ascii'), *rest)
+        with open(path) as handle:
+            return handle.read()
+    finally:
+        os.remove(path)
+
+
+def test_parallel_words_match_serial():
+    print("testing _speedups.write_words_parallel matches generate")
+    if _parallel_speedups() is None:
+        return  # extension absent or parallel path unsupported on this platform
+    for charset, delim, minlen, maxlen in [
+            ("ab", "\n", 1, 2),
+            ("abcde", "\n", 1, 3),
+            ("xyz", "||", 2, 3),
+            ("a", "\n", 1, 4),
+    ]:
+        for nthreads in (1, 2, 3, 4):
+            expected = ''.join(
+                wordlist.Generator(charset, delim).generate(minlen, maxlen))
+            written = _run_parallel(
+                'write_words_parallel', charset, delim, minlen, maxlen,
+                nthreads)
+            assert_equals(written, expected)
+
+
+def test_parallel_pattern_match_serial():
+    print("testing _speedups.write_pattern_parallel matches generate")
+    if _parallel_speedups() is None:
+        return
+    for charset, delim, pattern in [
+            ("ab", "\n", "@@"),
+            ("abcdef", "\n", "@@x@@"),
+            ("0123", "\n", "@-@-@"),
+    ]:
+        for nthreads in (1, 2, 4):
+            expected = ''.join(
+                wordlist.Generator(charset, delim).generate_with_pattern(
+                    pattern))
+            written = _run_parallel(
+                'write_pattern_parallel', charset, delim,
+                pattern.encode('ascii'), nthreads)
+            assert_equals(written, expected)
