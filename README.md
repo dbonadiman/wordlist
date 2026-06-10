@@ -68,7 +68,7 @@ are decoded, `''` means none):
 Count how big a run would be, without generating it:
 
     $ wordlist a-z0-9 -M 8 -c
-    2901713047668 words, 26115417429012 bytes (23.8 TiB)
+    2901713047668 words, 26032511341944 bytes (23.7 TiB)
 
 Print a summary (charset, lengths, word/byte count, timing) to stderr:
 
