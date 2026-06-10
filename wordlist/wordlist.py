@@ -34,46 +34,64 @@ import wordlist._util as utils
 _BLOCK_WORDS = 1 << 16
 
 
-def _iter_blocks(pools, target=_BLOCK_WORDS):
+def _iter_blocks(pools, cap=_BLOCK_WORDS):
     """
     Yield the full cartesian product of ``pools`` (an iterable of
     character pools) as concatenated string blocks rather than one word
     at a time.
 
     The pools are split into a *head* and a *tail*.  Every tail
-    combination is materialised once into a list of strings; then, for
-    each head prefix, an entire block of words is produced with a single
-    ``str.join``.  This collapses what would be ``product`` of all pool
-    sizes ``str.join`` calls down to roughly ``head_size + tail_size``
-    calls, while ``target`` bounds the tail (and therefore the per-block
-    memory).
+    combination is materialised once into a list of strings (one
+    ``str.join`` each); then, for each head prefix, an entire block of
+    words is produced with a single ``str.join``.  The whole product is
+    therefore emitted with only ``tail_count + head_count`` join calls
+    instead of one per word.
+
+    Because ``tail_count * head_count`` is fixed (it is the total number
+    of words), that sum is smallest when the split is *balanced* — each
+    side close to the square root of the total — not when the tail is as
+    large as possible.  The split is chosen to minimise the call count,
+    subject to ``cap`` bounding the tail (and hence per-block memory).
     """
     sizes = [len(pool) for pool in pools]
     count = len(pools)
 
-    # Grow the tail from the right while it stays within the target size,
-    # so the bulk of the work happens in the precomputed tail join.
-    split = count
-    tail_size = 1
-    while split > 0 and tail_size * sizes[split - 1] <= target:
-        split -= 1
-        tail_size *= sizes[split]
-    if split == count:
-        # Even a single trailing pool exceeds the target; keep one in the
-        # tail so there is always something to join in bulk.
-        split = count - 1
+    total = 1
+    for size in sizes:
+        total *= size
 
-    head_pools = pools[:split]
-    tail_pools = pools[split:]
+    # Pick the split point that minimises tail_count + head_count while
+    # keeping the materialised tail within the memory cap.  ``split`` is
+    # the index where the tail begins: head = pools[:split], tail =
+    # pools[split:].
+    best_split = count - 1
+    best_cost = None
+    tail_count = 1
+    for split in range(count - 1, -1, -1):
+        tail_count *= sizes[split]
+        if tail_count > cap:
+            break
+        head_count = total // tail_count
+        cost = tail_count + head_count
+        if best_cost is None or cost < best_cost:
+            best_cost = cost
+            best_split = split
+
+    head_pools = pools[:best_split]
+    tail_pools = pools[best_split:]
     joiner = ''.join
 
     tail = [joiner(combo) for combo in product(*tail_pools)] if tail_pools \
         else ['']
 
+    # Leading '' so that ``prefix.join(parts)`` puts a prefix in front of
+    # every tail word -- i.e. yields prefix+t0 + prefix+t1 + ...  in a
+    # single join, avoiding the extra full-block copy that
+    # ``prefix + prefix.join(tail)`` would incur.
+    parts = [''] + tail
+
     for head in product(*head_pools):
-        prefix = joiner(head)
-        # ''.join(prefix + t for t in tail) without the per-word Python loop.
-        yield prefix + prefix.join(tail)
+        yield joiner(head).join(parts)
 
 
 def _length_pools(charset, length, delimiter):
