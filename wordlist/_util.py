@@ -18,22 +18,32 @@ def char_range(starting_char, ending_char):
         yield chr(char)
 
 
+def _is_word_char(char):
+    """Mirror regex ``\\w``: ASCII letters, digits and underscore."""
+    return char.isalnum() or char == '_'
+
+
 def parse_charset(charset):
     """
-    Finds out whether there are intervals to expand and
-    creates the charset
+    Expand ``a-z`` style ranges in place while preserving every other
+    character.  ``a-z0-9!`` yields the full lower-case alphabet, the
+    digits, and ``!``.  A ``-`` that is not part of a valid ascending
+    range (e.g. leading, trailing, or ``z-a``) is kept literally.
     """
-    import re
-    regex = r'(\w-\w)'
-    pat = re.compile(regex)
-    found = pat.findall(charset)
-    result = ''
-    if found:
-        for element in found:
-            for char in char_range(element[0], element[-1]):
-                result += char
-        return result
-    return charset
+    result = []
+    i = 0
+    length = len(charset)
+    while i < length:
+        if (i + 2 < length and charset[i + 1] == '-'
+                and _is_word_char(charset[i]) and _is_word_char(charset[i + 2])
+                and ord(charset[i]) <= ord(charset[i + 2])):
+            for char in char_range(charset[i], charset[i + 2]):
+                result.append(char)
+            i += 3
+        else:
+            result.append(charset[i])
+            i += 1
+    return ''.join(result)
 
 
 def get_pattern_length(string):

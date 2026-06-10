@@ -1,58 +1,114 @@
 #! /usr/bin/env python
 from __future__ import print_function
 
+import errno
+import os
 import sys
-from argparse import ArgumentParser
+import time
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 
 
-def __get_parser():
+def __get_parser(version):
     # command line option parsing
-    parser = ArgumentParser()
-    parser.add_argument('charset', help='Charset to use')
-    parser.add_argument('-m', '--min', help='minimum word size', type=int)
-    parser.add_argument('-M', '--max', help='Maximum word size', type=int)
-    parser.add_argument('-o', '--out', help='Saves output to specified file')
-    parser.add_argument('pattern', help='Pattern to follow', nargs='?')
-    parser.add_argument('-s', '--shards', type=int, default=1,
-                        help='Split output across N files (with -o), '
-                             'generated in parallel; they concatenate to '
-                             'the single-file output')
-    parser.add_argument('-v', '--verbose', help='print the progress',
-                        default=False, action="store_true")
+    parser = ArgumentParser(
+        description='Generate every word over a charset, by length range '
+                    'or following a pattern.',
+        epilog='Examples:\n'
+               '  wordlist abc -m 1 -M 3             # words of length 1..3\n'
+               '  wordlist a-z0-9 -M 4 -o list.txt   # ranges, to a file\n'
+               '  wordlist abc @@q@@                 # pattern (@ = any char)\n'
+               '  wordlist a-z -M 6 -o out -s 4      # 4 shards out.000..003',
+        formatter_class=RawDescriptionHelpFormatter)
+    parser.add_argument('charset',
+                        help='characters to use; supports a-z / 0-9 ranges')
+    parser.add_argument('-m', '--min', type=int, metavar='N',
+                        help='minimum word length (default 1)')
+    parser.add_argument('-M', '--max', type=int, metavar='N',
+                        help='maximum word length (default: charset length)')
+    parser.add_argument('-o', '--out', metavar='FILE',
+                        help='write to FILE instead of stdout')
+    parser.add_argument('pattern', nargs='?',
+                        help="pattern where each '@' is replaced by any "
+                             "charset character (e.g. a@b@)")
+    parser.add_argument('-s', '--shards', type=int, default=1, metavar='N',
+                        help='split output across N files (needs -o); they '
+                             'concatenate to the single-file output')
+    parser.add_argument('-v', '--verbose', default=False, action='store_true',
+                        help='print a summary and timing to stderr')
+    parser.add_argument('--version', action='version',
+                        version='wordlist ' + version)
     return parser
 
 
-def main():
-    # command line option parsing
-    parser = __get_parser()
+def __estimate(charset, pattern, minlen, maxlen, delim_len):
+    """Return (word_count, byte_count) without enumerating anything."""
+    k = len(charset)
+    if pattern:
+        slots = pattern.count('@')
+        if slots == 0:
+            return 0, 0
+        words = k ** slots
+        return words, words * (len(pattern) + delim_len)
+    words = 0
+    nbytes = 0
+    for length in range(minlen, maxlen + 1):
+        n = k ** length
+        words += n
+        nbytes += n * (length + delim_len)
+    return words, nbytes
 
+
+def __human(n):
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'):
+        if n < 1024.0 or unit == 'PiB':
+            return '%.1f %s' % (n, unit)
+        n /= 1024.0
+
+
+def main():
+    parser = __get_parser(wordlist.__version__)
     args = vars(parser.parse_args())
+
     charset = args['charset']
     pattern = args['pattern']
-    minlen = args['min']
-    maxlen = args['max']
+    minlen = args['min'] if args['min'] is not None else 1
+    maxlen = args['max'] if args['max'] is not None else len(charset)
     verbose = args['verbose']
-
     shards = args['shards']
-
-    if minlen is None:
-        minlen = 1
-
-    if maxlen is None:
-        maxlen = len(charset)
 
     wrdlst = wordlist.Generator(charset, '\n')
 
+    if not pattern and (minlen < 1 or maxlen < minlen):
+        parser.error('length range must satisfy 1 <= --min <= --max '
+                     '(got min=%s, max=%s)' % (minlen, maxlen))
+    if shards < 1:
+        parser.error('--shards must be >= 1')
+
+    if verbose:
+        words, nbytes = __estimate(wrdlst.charset, pattern, minlen, maxlen, 1)
+        if pattern:
+            print('pattern: %r  (%d placeholders)'
+                  % (pattern, pattern.count('@')), file=sys.stderr)
+        else:
+            print('lengths: %d..%d' % (minlen, maxlen), file=sys.stderr)
+        print('charset: %r  (%d symbols)'
+              % (wrdlst.charset, len(wrdlst.charset)), file=sys.stderr)
+        print('output : %d words, %s' % (words, __human(nbytes)),
+              file=sys.stderr)
+    started = time.time()
+
     # Sharded output: split a plain (non-pattern) word list across N files
     # generated in parallel.  Needs -o for the base name.
-    if shards and shards > 1 and not pattern:
+    if shards > 1 and not pattern:
         if args['out'] is None:
-            print("ERROR: --shards requires -o BASENAME", file=sys.stderr)
-            sys.exit(1)
+            parser.error('--shards requires -o BASENAME')
         paths = ['%s.%03d' % (args['out'], i) for i in range(shards)]
         wrdlst.write_sharded(paths, minlen, maxlen)
+        if verbose:
+            __report(started, '%s.000..%03d' % (args['out'], shards - 1))
         return
 
+    filedesc = None
     try:
         if args['out'] is None:
             filedesc = sys.stdout
@@ -60,22 +116,56 @@ def main():
             filedesc = open(args['out'], 'w')
 
         # The write* methods stream straight to the file descriptor through
-        # the compiled accelerator when it is available (falling back to the
+        # the compiled accelerator when available (falling back to the
         # portable block generator otherwise), producing identical output.
         if pattern:
             wrdlst.write_with_pattern(filedesc, pattern)
-        # generate normally otherwise
         else:
             wrdlst.write(filedesc, minlen, maxlen)
     finally:
-        filedesc.close()
+        if filedesc is not None and filedesc is not sys.stdout:
+            filedesc.close()
+
+    if verbose:
+        __report(started, args['out'] or 'stdout')
+
+
+def __report(started, where):
+    print('done: %s in %.3fs' % (where, time.time() - started),
+          file=sys.stderr)
+
+
+def __run():
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except ValueError as err:
+        print('wordlist: error: %s' % err, file=sys.stderr)
+        sys.exit(1)
+    except EnvironmentError as err:
+        # EnvironmentError covers IOError/OSError on both Python 2 and 3.
+        if getattr(err, 'errno', None) == errno.EPIPE:
+            # A downstream consumer (e.g. `| head`) closed the pipe early.
+            # Normal: exit quietly and silence the secondary flush error
+            # Python raises at interpreter shutdown.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+            except OSError:
+                pass
+            sys.exit(0)
+        print('wordlist: error: %s' % err, file=sys.stderr)
+        sys.exit(1)
+
 
 if __name__ == '__main__':
 
     try:
         import wordlist
-    except:
-        print("ERROR: The wordlist package is not properly installed")
+    except ImportError:
+        print("ERROR: The wordlist package is not properly installed",
+              file=sys.stderr)
         sys.exit(1)
 
-    main()
+    __run()

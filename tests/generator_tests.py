@@ -3,6 +3,33 @@ import os
 import tempfile
 
 import wordlist
+import wordlist._util as _util
+
+
+def test_parse_charset_plain():
+    print("testing parse_charset keeps a plain charset untouched")
+    assert_equals(_util.parse_charset('abc!@#'), 'abc!@#')
+
+
+def test_parse_charset_range():
+    print("testing parse_charset expands a single range")
+    assert_equals(_util.parse_charset('a-e'), 'abcde')
+
+
+def test_parse_charset_mixed_keeps_all_chars():
+    print("testing parse_charset keeps non-range chars alongside ranges")
+    # Regression: ranges used to drop every other character.
+    assert_equals(_util.parse_charset('a-c9'), 'abc9')
+    assert_equals(_util.parse_charset('a-c0-2!'), 'abc012!')
+    assert_equals(_util.parse_charset('x-za-c'), 'xyzabc')
+
+
+def test_parse_charset_literal_dash():
+    print("testing parse_charset keeps a non-range dash literally")
+    assert_equals(_util.parse_charset('-ab'), '-ab')
+    assert_equals(_util.parse_charset('ab-'), 'ab-')
+    # descending 'range' is not a range; kept literally
+    assert_equals(_util.parse_charset('z-a'), 'z-a')
 
 
 def _write_to_file(method, *args):

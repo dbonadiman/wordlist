@@ -53,6 +53,22 @@ or:
 
     $ wordlist [charset] > list.txt
 
+Split the output across several files generated in parallel (they
+concatenate back to the single-file output). Useful for very large lists
+and for tools that accept multiple dictionaries:
+
+    $ wordlist a-z -M 6 -o out -s 4      # writes out.000 .. out.003
+
+Print a summary (charset, lengths, word/byte count, timing) to stderr:
+
+    $ wordlist a-z0-9 -M 8 -v -o list.txt
+
+Show the version:
+
+    $ wordlist --version
+
+Run `wordlist -h` for the full option list.
+
 ### Python
 
 Generate all the possible words with length within a given interval (e.g. from 2 to 5):
@@ -73,15 +89,27 @@ for each in generator.generate_with_pattern('@@q@@er@t@y'):
     print(each)
 ```
 
+Stream straight to a file or stdout (uses the optional C accelerator when
+available, otherwise a pure-Python fallback — same bytes either way):
+
+```python
+import sys, wordlist
+generator = wordlist.Generator('abc', delimiter='\n')
+generator.write(sys.stdout, 1, 4)             # length 1..4
+generator.write_with_pattern(open('p.txt', 'w'), 'a@b@')
+generator.write_sharded(['out.0', 'out.1'], 1, 6)   # parallel, multi-file
+```
+
 #### [charset]
-There are to ways to pass the charset to the script:
+There are two ways to pass the charset to the script:
  * A simple list of characters
 
     `$ wordlist abcxyz987`
 
- * A list of ranges following the simple regex `(\w-\w)`
+ * Ranges of the form `X-Y` (ASCII letters/digits), which may be freely
+   mixed with plain characters:
 
-    `$ wordlist a-z0-9A-Z`
+    `$ wordlist a-z0-9A-Z`  ·  `$ wordlist a-f0-9!@#`
 
 #### Pattern
 The pattern should be like:

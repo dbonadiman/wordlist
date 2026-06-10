@@ -129,7 +129,9 @@ class Generator(object):
         single C-level ``str.join`` with no per-word concatenation.
         """
         if minlen < 1 or maxlen < minlen:
-            raise ValueError()
+            raise ValueError(
+                'length range must satisfy 1 <= minlen <= maxlen '
+                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
 
         charset = self.charset
         delimiter = self.delimiter
@@ -149,7 +151,9 @@ class Generator(object):
         bounded by ``_BLOCK_WORDS``.
         """
         if minlen < 1 or maxlen < minlen:
-            raise ValueError()
+            raise ValueError(
+                'length range must satisfy 1 <= minlen <= maxlen '
+                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
 
         charset = self.charset
         delimiter = self.delimiter
@@ -199,7 +203,9 @@ class Generator(object):
         generator.  Either way the bytes produced are identical.
         """
         if minlen < 1 or maxlen < minlen:
-            raise ValueError()
+            raise ValueError(
+                'length range must satisfy 1 <= minlen <= maxlen '
+                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
         if not _fast.write_words(fileobj, self.charset, self.delimiter,
                                  minlen, maxlen):
             fileobj.writelines(self.generate_blocks(minlen, maxlen))
@@ -230,7 +236,9 @@ class Generator(object):
         accelerator is unavailable or the charset is not pure ASCII.
         """
         if minlen < 1 or maxlen < minlen:
-            raise ValueError()
+            raise ValueError(
+                'length range must satisfy 1 <= minlen <= maxlen '
+                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
         if not paths:
             raise ValueError('need at least one shard path')
         if nthreads is None:
