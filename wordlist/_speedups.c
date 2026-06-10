@@ -137,14 +137,16 @@ wl_emit(int fd, char *out, size_t bufsize, size_t *outlen_io,
             }
             dst = out + outlen;
             for (j = 0; j < k; j++) {
-                row[inner] = charset[j];
+                /* Copy the stable template, then stamp the inner byte into
+                 * the destination.  Keeping the template unmutated avoids a
+                 * store-to-load forwarding stall on the hot path. */
                 wl_copy(dst, row, width);
+                dst[inner] = charset[j];
                 dst += width;
             }
             outlen += burst;
 
             /* carry into the positions above the inner one */
-            row[inner] = charset[0];
             pos = nvar - 2;
             while (pos >= 0) {
                 if (++idx[pos] < k) {
@@ -267,13 +269,12 @@ wl_emit_pwrite(int fd, off_t offset, char *buf, size_t bufsize,
             }
             dst = buf + outlen;
             for (j = 0; j < k; j++) {
-                row[inner] = charset[j];
                 wl_copy(dst, row, width);
+                dst[inner] = charset[j];
                 dst += width;
             }
             outlen += burst;
 
-            row[inner] = charset[0];
             pos = nvar - 2;
             while (pos >= 0) {
                 if (++idx[pos] < k) {
