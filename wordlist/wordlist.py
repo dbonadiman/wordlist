@@ -14,6 +14,8 @@ Generates all possible permutations of a given charset.
 
 from __future__ import print_function
 
+import os
+
 from itertools import product
 
 try:
@@ -214,3 +216,32 @@ class Generator(object):
         if not _fast.write_pattern(fileobj, self.charset, self.delimiter,
                                    pattern):
             fileobj.writelines(self.generate_with_pattern_blocks(pattern))
+
+    def write_sharded(self, paths, minlen, maxlen, nthreads=None):
+        """
+        Write every word of length ``minlen``..``maxlen`` partitioned
+        across the files named in ``paths`` (one per shard), generated
+        concurrently.  Concatenating the files in list order reproduces
+        exactly what :meth:`write` would write to a single file.
+
+        Writing to separate files avoids the single-inode write
+        bottleneck, so this scales across cores.  Falls back to writing
+        the whole output to ``paths[0]`` (leaving the rest empty) when the
+        accelerator is unavailable or the charset is not pure ASCII.
+        """
+        if minlen < 1 or maxlen < minlen:
+            raise ValueError()
+        if not paths:
+            raise ValueError('need at least one shard path')
+        if nthreads is None:
+            nthreads = min(len(paths), os.cpu_count() or 1)
+
+        if not _fast.write_words_sharded(paths, self.charset, self.delimiter,
+                                         minlen, maxlen, nthreads):
+            # Portable fallback: everything into the first file, the rest
+            # empty.  Still concatenates to the single-file output.
+            with open(paths[0], 'wb') as handle:
+                for block in self.generate_blocks(minlen, maxlen):
+                    handle.write(block.encode())
+            for extra in paths[1:]:
+                open(extra, 'wb').close()

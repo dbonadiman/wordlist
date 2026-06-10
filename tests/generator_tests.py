@@ -134,6 +134,30 @@ def test_write_matches_generate():
         assert_equals(written, expected)
 
 
+def test_write_sharded_concatenates_to_generate():
+    print("testing wordlist.Generator.write_sharded concatenation")
+    import shutil
+    for charset, delim, minlen, maxlen, nshards in [
+            ("ab", "\n", 1, 2, 1),
+            ("abc", "\n", 1, 4, 3),
+            ("abcde", "\n", 1, 4, 4),
+            ("xyz", "||", 2, 3, 5),
+            ("a", "\n", 1, 4, 2),
+    ]:
+        expected = ''.join(
+            wordlist.Generator(charset, delim).generate(minlen, maxlen))
+        tmpdir = tempfile.mkdtemp()
+        try:
+            paths = [os.path.join(tmpdir, 'sh.%03d' % i)
+                     for i in range(nshards)]
+            wordlist.Generator(charset, delim).write_sharded(
+                paths, minlen, maxlen)
+            joined = ''.join(open(p).read() for p in paths)
+            assert_equals(joined, expected)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 def test_write_with_pattern_matches_generate():
     print("testing wordlist.Generator.write_with_pattern matches generate")
     for charset, delim, pattern in [

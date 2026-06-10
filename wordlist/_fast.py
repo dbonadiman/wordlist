@@ -75,6 +75,27 @@ def write_words(fileobj, charset, delimiter, minlen, maxlen):
     return True
 
 
+def sharded_supported():
+    """True if the C sharded writer is available."""
+    return available and hasattr(_speedups, 'write_words_sharded')
+
+
+def write_words_sharded(paths, charset, delimiter, minlen, maxlen, nthreads):
+    """Generate words partitioned across the files named in `paths`.
+
+    Returns True if handled by the accelerator, False to fall back.
+    """
+    if not sharded_supported():
+        return False
+    if not (_is_ascii(charset) and _is_ascii(delimiter)):
+        return False
+    path_bytes = [os.fsencode(p) for p in paths]
+    _speedups.write_words_sharded(charset.encode('ascii'),
+                                  delimiter.encode('ascii'),
+                                  minlen, maxlen, path_bytes, nthreads)
+    return True
+
+
 def write_pattern(fileobj, charset, delimiter, pattern):
     """Stream every word matching pattern to fileobj via C.
 

@@ -13,6 +13,10 @@ def __get_parser():
     parser.add_argument('-M', '--max', help='Maximum word size', type=int)
     parser.add_argument('-o', '--out', help='Saves output to specified file')
     parser.add_argument('pattern', help='Pattern to follow', nargs='?')
+    parser.add_argument('-s', '--shards', type=int, default=1,
+                        help='Split output across N files (with -o), '
+                             'generated in parallel; they concatenate to '
+                             'the single-file output')
     parser.add_argument('-v', '--verbose', help='print the progress',
                         default=False, action="store_true")
     return parser
@@ -29,11 +33,25 @@ def main():
     maxlen = args['max']
     verbose = args['verbose']
 
+    shards = args['shards']
+
     if minlen is None:
         minlen = 1
 
     if maxlen is None:
         maxlen = len(charset)
+
+    wrdlst = wordlist.Generator(charset, '\n')
+
+    # Sharded output: split a plain (non-pattern) word list across N files
+    # generated in parallel.  Needs -o for the base name.
+    if shards and shards > 1 and not pattern:
+        if args['out'] is None:
+            print("ERROR: --shards requires -o BASENAME", file=sys.stderr)
+            sys.exit(1)
+        paths = ['%s.%03d' % (args['out'], i) for i in range(shards)]
+        wrdlst.write_sharded(paths, minlen, maxlen)
+        return
 
     try:
         if args['out'] is None:
@@ -41,7 +59,6 @@ def main():
         else:
             filedesc = open(args['out'], 'w')
 
-        wrdlst = wordlist.Generator(charset, '\n')
         # The write* methods stream straight to the file descriptor through
         # the compiled accelerator when it is available (falling back to the
         # portable block generator otherwise), producing identical output.

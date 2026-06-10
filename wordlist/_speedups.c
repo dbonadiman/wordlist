@@ -228,6 +228,8 @@ wl_alloc_row(size_t width)
 #include <pthread.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define WL_HAS_PARALLEL 1
 
@@ -825,6 +827,320 @@ overflow:
     PyErr_SetString(PyExc_OverflowError, "output too large for parallel path");
     return NULL;
 }
+
+/* Raw-fd sink for shard workers: plain write(), no Python C-API (GIL is
+ * released).  Records errno in the context on failure. */
+typedef struct { int fd; int err; } wl_rawfd_ctx;
+
+static int
+wl_sink_rawfd(void *ctx, const char *buf, size_t len)
+{
+    wl_rawfd_ctx *c = (wl_rawfd_ctx *) ctx;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(c->fd, buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            c->err = errno ? errno : EIO;
+            return -1;
+        }
+        off += (size_t) n;
+    }
+    return 0;
+}
+
+typedef struct {
+    const char *charset;
+    Py_ssize_t k;
+    const char *delim;
+    Py_ssize_t dlen;
+    Py_ssize_t minlen;
+    char **paths;
+    Py_ssize_t nshards;
+    Py_ssize_t *first;     /* first work-unit index of each shard */
+    Py_ssize_t *last;      /* one past the last work-unit of each shard */
+    size_t bufsize;
+    size_t maxwidth;
+    pthread_mutex_t lock;
+    Py_ssize_t next;
+    int err;
+} wl_sjob;
+
+/*
+ * Shard worker: claims whole shards and writes each to its own file.  A
+ * work unit is a (length, first-character) pair; unit `u` is length
+ * minlen + u/k starting with charset[u % k], i.e. all k^(length-1) words
+ * with that length and leading character.  Units are laid out in global
+ * output order, so concatenating the shard files in order reproduces the
+ * single-file output exactly.  Separate files mean separate inodes, so
+ * the writers do not contend on a shared inode lock.
+ */
+static void *
+wl_shard_worker(void *arg)
+{
+    wl_sjob *job = (wl_sjob *) arg;
+    char *out = (char *) malloc(job->bufsize + WL_SLACK);
+    char *row = (char *) malloc(job->maxwidth + WL_SLACK);
+    Py_ssize_t *varoff = (Py_ssize_t *) malloc(
+        (size_t) (job->maxwidth ? job->maxwidth : 1) * sizeof(Py_ssize_t));
+
+    if (out == NULL || row == NULL || varoff == NULL) {
+        pthread_mutex_lock(&job->lock);
+        if (!job->err) {
+            job->err = ENOMEM;
+        }
+        pthread_mutex_unlock(&job->lock);
+        free(out);
+        free(row);
+        free(varoff);
+        return NULL;
+    }
+
+    for (;;) {
+        Py_ssize_t s, u;
+        int fd, rc = 0;
+        wl_rawfd_ctx ctx;
+
+        pthread_mutex_lock(&job->lock);
+        if (job->err || job->next >= job->nshards) {
+            pthread_mutex_unlock(&job->lock);
+            break;
+        }
+        s = job->next++;
+        pthread_mutex_unlock(&job->lock);
+
+        fd = open(job->paths[s], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            pthread_mutex_lock(&job->lock);
+            if (!job->err) {
+                job->err = errno ? errno : EIO;
+            }
+            pthread_mutex_unlock(&job->lock);
+            break;
+        }
+        ctx.fd = fd;
+        ctx.err = 0;
+
+        for (u = job->first[s]; u < job->last[s] && rc == 0; u++) {
+            Py_ssize_t L = job->minlen + u / job->k;
+            Py_ssize_t c = u % job->k;
+            size_t width = (size_t) L + (size_t) job->dlen;
+            Py_ssize_t i;
+
+            row[0] = job->charset[c];
+            for (i = 1; i < L; i++) {
+                row[i] = job->charset[0];
+                varoff[i - 1] = i;
+            }
+            if (job->dlen) {
+                memcpy(row + L, job->delim, (size_t) job->dlen);
+            }
+            memset(row + width, 0, WL_SLACK);
+
+            rc = wl_emit_core(out, job->bufsize, row, width, varoff, L - 1,
+                              job->charset, job->k, wl_sink_rawfd, &ctx);
+        }
+        close(fd);
+
+        if (rc) {
+            int e = (rc == -2) ? ENOMEM : (ctx.err ? ctx.err : EIO);
+            pthread_mutex_lock(&job->lock);
+            if (!job->err) {
+                job->err = e;
+            }
+            pthread_mutex_unlock(&job->lock);
+            break;
+        }
+    }
+
+    free(out);
+    free(row);
+    free(varoff);
+    return NULL;
+}
+
+/* Run shard workers across up to nthreads threads (caller thread helps). */
+static void
+wl_run_shards(wl_sjob *job, int nthreads)
+{
+    pthread_t *tids;
+    int i, made = 0;
+
+    if (nthreads < 1) {
+        nthreads = 1;
+    }
+    tids = (pthread_t *) malloc(sizeof(pthread_t) * (size_t) nthreads);
+    if (tids == NULL) {
+        nthreads = 1;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    for (i = 0; i < nthreads - 1; i++) {
+        if (pthread_create(&tids[i], NULL, wl_shard_worker, job) == 0) {
+            made++;
+        }
+        else {
+            break;
+        }
+    }
+    wl_shard_worker(job);
+    for (i = 0; i < made; i++) {
+        pthread_join(tids[i], NULL);
+    }
+    Py_END_ALLOW_THREADS
+
+    free(tids);
+}
+
+/*
+ * write_words_sharded(fd_unused, charset, delim, minlen, maxlen,
+ *                     paths, nthreads)
+ *
+ * Generate the same bytes as write_words, but partitioned across the
+ * files named in `paths` (one per shard) so they can be produced
+ * concurrently without inode-lock contention.  Concatenating the files
+ * in list order reproduces the single-file output.
+ */
+static PyObject *
+py_write_words_sharded(PyObject *self, PyObject *args)
+{
+    const char *charset, *delim;
+    Py_ssize_t k, dlen, minlen, maxlen;
+    PyObject *path_seq;
+    int nthreads;
+    Py_ssize_t nshards, nunits, u, i;
+    char **paths = NULL;
+    Py_ssize_t *first = NULL, *last = NULL;
+    double *cum = NULL, total;
+    wl_sjob job;
+    int rc_err;
+
+    if (!PyArg_ParseTuple(args, "y#y#nnOi", &charset, &k, &delim, &dlen,
+                          &minlen, &maxlen, &path_seq, &nthreads)) {
+        return NULL;
+    }
+    if (minlen < 1 || maxlen < minlen) {
+        PyErr_SetString(PyExc_ValueError, "invalid length range");
+        return NULL;
+    }
+    path_seq = PySequence_Fast(path_seq, "paths must be a sequence");
+    if (path_seq == NULL) {
+        return NULL;
+    }
+    nshards = PySequence_Fast_GET_SIZE(path_seq);
+    if (nshards < 1) {
+        Py_DECREF(path_seq);
+        PyErr_SetString(PyExc_ValueError, "need at least one shard path");
+        return NULL;
+    }
+    if (k <= 0) {
+        Py_DECREF(path_seq);
+        Py_RETURN_NONE;
+    }
+
+    paths = (char **) calloc((size_t) nshards, sizeof(char *));
+    if (paths == NULL) {
+        Py_DECREF(path_seq);
+        return PyErr_NoMemory();
+    }
+    for (i = 0; i < nshards; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(path_seq, i);
+        if (!PyBytes_Check(item)) {
+            free(paths);
+            Py_DECREF(path_seq);
+            PyErr_SetString(PyExc_TypeError, "shard paths must be bytes");
+            return NULL;
+        }
+        paths[i] = PyBytes_AsString(item);  /* borrowed, valid while seq held */
+    }
+
+    /* Partition the (length, first-char) units into contiguous,
+     * roughly byte-balanced shards.  Unit size depends only on length. */
+    nunits = (maxlen - minlen + 1) * k;
+    cum = (double *) malloc((size_t) (nunits + 1) * sizeof(double));
+    first = (Py_ssize_t *) malloc((size_t) nshards * sizeof(Py_ssize_t));
+    last = (Py_ssize_t *) malloc((size_t) nshards * sizeof(Py_ssize_t));
+    if (cum == NULL || first == NULL || last == NULL) {
+        free(paths);
+        free(cum);
+        free(first);
+        free(last);
+        Py_DECREF(path_seq);
+        return PyErr_NoMemory();
+    }
+    cum[0] = 0.0;
+    for (u = 0; u < nunits; u++) {
+        Py_ssize_t L = minlen + u / k;
+        double sz = (double) (L + dlen);
+        Py_ssize_t e;
+        for (e = 1; e < L; e++) {
+            sz *= (double) k;          /* k^(L-1) * (L+dlen) */
+        }
+        cum[u + 1] = cum[u] + sz;
+    }
+    total = cum[nunits];
+    for (i = 0; i < nshards; i++) {
+        first[i] = -1;
+        last[i] = 0;
+    }
+    for (u = 0; u < nunits; u++) {
+        Py_ssize_t sh = (total > 0.0)
+            ? (Py_ssize_t) (cum[u] * (double) nshards / total) : 0;
+        if (sh >= nshards) {
+            sh = nshards - 1;
+        }
+        if (first[sh] < 0) {
+            first[sh] = u;
+        }
+        last[sh] = u + 1;
+    }
+    for (i = 0; i < nshards; i++) {
+        if (first[i] < 0) {       /* empty shard: writes an empty file */
+            first[i] = 0;
+            last[i] = 0;
+        }
+    }
+
+    job.charset = charset;
+    job.k = k;
+    job.delim = delim;
+    job.dlen = dlen;
+    job.minlen = minlen;
+    job.paths = paths;
+    job.nshards = nshards;
+    job.first = first;
+    job.last = last;
+    job.maxwidth = (size_t) maxlen + (size_t) dlen;
+    job.bufsize = wl_bufsize((size_t) k * job.maxwidth);
+    job.next = 0;
+    job.err = 0;
+    if (pthread_mutex_init(&job.lock, NULL) != 0) {
+        rc_err = errno ? errno : EAGAIN;
+        free(paths);
+        free(cum);
+        free(first);
+        free(last);
+        Py_DECREF(path_seq);
+        return wl_oserror(rc_err);
+    }
+
+    wl_run_shards(&job, nthreads);
+    pthread_mutex_destroy(&job.lock);
+
+    rc_err = job.err;
+    free(paths);
+    free(cum);
+    free(first);
+    free(last);
+    Py_DECREF(path_seq);
+
+    if (rc_err) {
+        return wl_oserror(rc_err);
+    }
+    Py_RETURN_NONE;
+}
 #endif /* WL_HAS_PARALLEL */
 
 static PyMethodDef wl_methods[] = {
@@ -841,6 +1157,9 @@ static PyMethodDef wl_methods[] = {
     {"write_pattern_parallel", py_write_pattern_parallel, METH_VARARGS,
      "write_pattern_parallel(fd, charset, delim, pattern, nthreads): "
      "concurrent write_pattern to a seekable fd."},
+    {"write_words_sharded", py_write_words_sharded, METH_VARARGS,
+     "write_words_sharded(charset, delim, minlen, maxlen, paths, nthreads): "
+     "write every word partitioned across the given shard files."},
 #endif
     {NULL, NULL, 0, NULL}
 };
