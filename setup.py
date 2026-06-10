@@ -1,11 +1,21 @@
 try:
-    from setuptools import setup
+    from setuptools import setup, Extension
+    _HAVE_SETUPTOOLS = True
 except ImportError:
-    from distutils.core import setup
+    from distutils.core import setup, Extension
+    _HAVE_SETUPTOOLS = False
 
 import wordlist
 
 install_requires = []
+
+# Optional C accelerator.  Marked optional so a missing compiler never
+# breaks installation -- the package falls back to the pure-Python path.
+speedups = Extension(
+    'wordlist._speedups',
+    sources=['wordlist/_speedups.c'],
+    optional=True,
+)
 
 
 config = {
@@ -17,6 +27,7 @@ config = {
     'version': wordlist.__version__,
     'install_requires': install_requires,
     'packages': ['wordlist'],
+    'ext_modules': [speedups],
     'scripts': ['bin/wordlist'],
     'keywords': ['words', 'generator', 'wordlist'],
     'name': wordlist.__title__

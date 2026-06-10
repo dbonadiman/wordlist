@@ -24,6 +24,7 @@ except ImportError:
     _imap = map
 
 import wordlist._util as utils
+import wordlist._fast as _fast
 
 
 # Maximum number of words assembled into a single in-memory block by the
@@ -185,3 +186,31 @@ class Generator(object):
         pools = _pattern_pools(self.charset, pattern, self.delimiter)
         for block in _iter_blocks(pools):
             yield block
+
+    def write(self, fileobj, minlen, maxlen):
+        """
+        Write every word of length ``minlen``..``maxlen`` to ``fileobj``.
+
+        Uses the compiled accelerator to stream the result straight to
+        the file descriptor when it is available and the charset/delimiter
+        are pure ASCII; otherwise falls back to the portable block
+        generator.  Either way the bytes produced are identical.
+        """
+        if minlen < 1 or maxlen < minlen:
+            raise ValueError()
+        if not _fast.write_words(fileobj, self.charset, self.delimiter,
+                                 minlen, maxlen):
+            fileobj.writelines(self.generate_blocks(minlen, maxlen))
+
+    def write_with_pattern(self, fileobj, pattern=None):
+        """
+        Write every word matching ``pattern`` to ``fileobj``.
+
+        Uses the compiled accelerator when possible (see :meth:`write`),
+        falling back to the portable block generator otherwise.
+        """
+        if utils.get_pattern_length(pattern) <= 0:
+            return
+        if not _fast.write_pattern(fileobj, self.charset, self.delimiter,
+                                   pattern):
+            fileobj.writelines(self.generate_with_pattern_blocks(pattern))

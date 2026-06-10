@@ -1,5 +1,20 @@
 from nose.tools import assert_equals, assert_raises
+import os
+import tempfile
+
 import wordlist
+
+
+def _write_to_file(method, *args):
+    """Run a Generator.write* method against a temp file and return its text."""
+    fd, path = tempfile.mkstemp()
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            method(handle, *args)
+        with open(path) as handle:
+            return handle.read()
+    finally:
+        os.remove(path)
 
 
 def test_generate():
@@ -102,3 +117,39 @@ def test_generate_with_pattern_5():
     c = gen.generate_with_pattern('')
     with assert_raises(StopIteration):
         next(c)
+
+
+def test_write_matches_generate():
+    print("testing wordlist.Generator.write matches generate")
+    for charset, delim, minlen, maxlen in [
+            ("ab", "\n", 1, 2),
+            ("abc", "\n", 1, 4),
+            ("a-z0-9", "\n", 1, 2),
+            ("xyz", "||", 2, 3),
+    ]:
+        expected = ''.join(
+            wordlist.Generator(charset, delim).generate(minlen, maxlen))
+        written = _write_to_file(
+            wordlist.Generator(charset, delim).write, minlen, maxlen)
+        assert_equals(written, expected)
+
+
+def test_write_with_pattern_matches_generate():
+    print("testing wordlist.Generator.write_with_pattern matches generate")
+    for charset, delim, pattern in [
+            ("ab", "\n", "@@"),
+            ("ab", "", "a@b"),
+            ("abcdef", "\n", "@@x@@"),
+            ("0123", "\n", "@-@-@"),
+    ]:
+        expected = ''.join(
+            wordlist.Generator(charset, delim).generate_with_pattern(pattern))
+        written = _write_to_file(
+            wordlist.Generator(charset, delim).write_with_pattern, pattern)
+        assert_equals(written, expected)
+
+
+def test_write_empty_pattern_writes_nothing():
+    print("testing wordlist.Generator.write_with_pattern('') writes nothing")
+    written = _write_to_file(wordlist.Generator("ab").write_with_pattern, '')
+    assert_equals(written, '')
