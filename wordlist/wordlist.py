@@ -119,6 +119,40 @@ class Generator(object):
         self.charset = utils.parse_charset(charset)
         self.delimiter = delimiter
 
+    def count(self, minlen, maxlen):
+        """
+        Return how many words :meth:`generate` would produce for the
+        given length range, and the number of bytes they would occupy
+        (including the delimiter), as an ``(words, nbytes)`` tuple.
+
+        Computed in closed form -- nothing is enumerated -- so it is
+        instant even for ranges far too large to ever materialise.
+        """
+        if minlen < 1 or maxlen < minlen:
+            raise ValueError(
+                'length range must satisfy 1 <= minlen <= maxlen '
+                '(got minlen=%r, maxlen=%r)' % (minlen, maxlen))
+        k = len(self.charset)
+        dlen = len(self.delimiter)
+        words = 0
+        nbytes = 0
+        for cur in range(minlen, maxlen + 1):
+            n = k ** cur
+            words += n
+            nbytes += n * (cur + dlen)
+        return words, nbytes
+
+    def count_with_pattern(self, pattern=None):
+        """
+        Return ``(words, nbytes)`` for :meth:`generate_with_pattern`
+        without enumerating anything.
+        """
+        slots = utils.get_pattern_length(pattern)
+        if slots <= 0:
+            return 0, 0
+        words = len(self.charset) ** slots
+        return words, words * (len(pattern) + len(self.delimiter))
+
     def generate(self, minlen, maxlen):
         """
         Generates words of different length without storing

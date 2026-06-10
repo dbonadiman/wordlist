@@ -33,6 +33,9 @@ def __get_parser(version):
     parser.add_argument('-s', '--shards', type=int, default=1, metavar='N',
                         help='split output across N files (needs -o); they '
                              'concatenate to the single-file output')
+    parser.add_argument('-c', '--count', default=False, action='store_true',
+                        help='print how many words (and bytes) would be '
+                             'generated, then exit without generating them')
     parser.add_argument('-v', '--verbose', default=False, action='store_true',
                         help='print a summary and timing to stderr')
     parser.add_argument('--version', action='version',
@@ -40,22 +43,11 @@ def __get_parser(version):
     return parser
 
 
-def __estimate(charset, pattern, minlen, maxlen, delim_len):
+def __estimate(wrdlst, pattern, minlen, maxlen):
     """Return (word_count, byte_count) without enumerating anything."""
-    k = len(charset)
     if pattern:
-        slots = pattern.count('@')
-        if slots == 0:
-            return 0, 0
-        words = k ** slots
-        return words, words * (len(pattern) + delim_len)
-    words = 0
-    nbytes = 0
-    for length in range(minlen, maxlen + 1):
-        n = k ** length
-        words += n
-        nbytes += n * (length + delim_len)
-    return words, nbytes
+        return wrdlst.count_with_pattern(pattern)
+    return wrdlst.count(minlen, maxlen)
 
 
 def __human(n):
@@ -84,8 +76,14 @@ def main():
     if shards < 1:
         parser.error('--shards must be >= 1')
 
+    # --count: report the size and exit without generating anything.
+    if args['count']:
+        words, nbytes = __estimate(wrdlst, pattern, minlen, maxlen)
+        print('%d words, %d bytes (%s)' % (words, nbytes, __human(nbytes)))
+        return
+
     if verbose:
-        words, nbytes = __estimate(wrdlst.charset, pattern, minlen, maxlen, 1)
+        words, nbytes = __estimate(wrdlst, pattern, minlen, maxlen)
         if pattern:
             print('pattern: %r  (%d placeholders)'
                   % (pattern, pattern.count('@')), file=sys.stderr)

@@ -24,6 +24,43 @@ def test_parse_charset_mixed_keeps_all_chars():
     assert_equals(_util.parse_charset('x-za-c'), 'xyzabc')
 
 
+def test_count_matches_generate():
+    print("testing Generator.count agrees with enumerating generate")
+    for charset, delim, minlen, maxlen in [
+            ("ab", "", 1, 3),
+            ("abc", "\n", 1, 4),
+            ("a-z0-9", "\n", 1, 2),
+            ("xyz", "||", 2, 3),
+    ]:
+        gen = wordlist.Generator(charset, delim)
+        words, nbytes = gen.count(minlen, maxlen)
+        produced = list(gen.generate(minlen, maxlen))
+        assert_equals(words, len(produced))
+        assert_equals(nbytes, sum(len(w) for w in produced))
+
+
+def test_count_with_pattern_matches_generate():
+    print("testing Generator.count_with_pattern agrees with enumeration")
+    for charset, delim, pattern in [
+            ("ab", "\n", "@@"),
+            ("abcd", "", "a@b@"),
+            ("ab", "\n", ""),       # no placeholders -> 0
+    ]:
+        gen = wordlist.Generator(charset, delim)
+        words, nbytes = gen.count_with_pattern(pattern)
+        produced = list(gen.generate_with_pattern(pattern))
+        assert_equals(words, len(produced))
+        assert_equals(nbytes, sum(len(w) for w in produced))
+
+
+def test_count_rejects_bad_range():
+    print("testing Generator.count validates the length range")
+    with assert_raises(ValueError):
+        wordlist.Generator("ab").count(0, 2)
+    with assert_raises(ValueError):
+        wordlist.Generator("ab").count(3, 2)
+
+
 def test_parse_charset_literal_dash():
     print("testing parse_charset keeps a non-range dash literally")
     assert_equals(_util.parse_charset('-ab'), '-ab')
