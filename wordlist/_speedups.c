@@ -26,6 +26,27 @@
 /* Default output buffer size: amortises write() syscalls. */
 #define WL_OUTBUF (1 << 20)
 
+/* Slack so a row copy may overshoot to the next 8-byte boundary safely. */
+#define WL_SLACK 8
+
+/*
+ * Copy `width` bytes from src to dst, rounding the work up to whole
+ * 8-byte stores.  src must have >= WL_SLACK padding and dst must have
+ * >= WL_SLACK slack past the logical end of the buffer.  The few extra
+ * bytes are either overwritten by the following row or left unused in
+ * the buffer tail (never flushed), so this stays correct while letting
+ * the compiler emit single-instruction stores for the common short row.
+ */
+static inline void
+wl_copy(char *dst, const char *src, size_t width)
+{
+    size_t i = 0;
+    do {
+        memcpy(dst + i, src + i, 8);
+        i += 8;
+    } while (i < width);
+}
+
 /* Write the first `len` bytes of `buf` to `fd`, retrying short writes. */
 static int
 wl_flush(int fd, const char *buf, size_t len)
@@ -73,26 +94,57 @@ wl_emit(int fd, char *out, size_t bufsize, size_t *outlen_io,
         return 0;
     }
 
-    idx = (Py_ssize_t *) PyMem_Calloc(nvar > 0 ? nvar : 1, sizeof(Py_ssize_t));
+    if (nvar == 0) {
+        /* no variable positions: a single row */
+        if (outlen + width > bufsize) {
+            if (outlen && wl_flush(fd, out, outlen) < 0) {
+                return -1;
+            }
+            outlen = 0;
+        }
+        wl_copy(out + outlen, row, width);
+        *outlen_io = outlen + width;
+        return 0;
+    }
+
+    idx = (Py_ssize_t *) PyMem_Calloc(nvar, sizeof(Py_ssize_t));
     if (idx == NULL) {
         PyErr_NoMemory();
         return -1;
     }
 
-    for (;;) {
-        if (outlen + width > bufsize) {
-            if (outlen && wl_flush(fd, out, outlen) < 0) {
-                rc = -1;
-                goto done;
-            }
-            outlen = 0;
-        }
-        memcpy(out + outlen, row, width);
-        outlen += width;
+    {
+        /*
+         * Emit the inner-most variable position as a tight burst of `k`
+         * rows (it just cycles through the charset with no carry), then
+         * advance the remaining positions once per burst.  This keeps the
+         * odometer and the buffer-space check off the hot per-row path.
+         */
+        Py_ssize_t inner = varoff[nvar - 1];
+        size_t burst = (size_t) k * width;
 
-        /* increment the odometer from the right-most variable position */
-        {
-            Py_ssize_t pos = nvar - 1;
+        for (;;) {
+            char *dst;
+            Py_ssize_t j, pos;
+
+            if (outlen + burst > bufsize) {
+                if (outlen && wl_flush(fd, out, outlen) < 0) {
+                    rc = -1;
+                    goto done;
+                }
+                outlen = 0;
+            }
+            dst = out + outlen;
+            for (j = 0; j < k; j++) {
+                row[inner] = charset[j];
+                wl_copy(dst, row, width);
+                dst += width;
+            }
+            outlen += burst;
+
+            /* carry into the positions above the inner one */
+            row[inner] = charset[0];
+            pos = nvar - 2;
             while (pos >= 0) {
                 if (++idx[pos] < k) {
                     row[varoff[pos]] = charset[idx[pos]];
@@ -103,7 +155,7 @@ wl_emit(int fd, char *out, size_t bufsize, size_t *outlen_io,
                 pos--;
             }
             if (pos < 0) {
-                break;  /* every digit wrapped: product exhausted */
+                break;  /* every higher digit wrapped: product exhausted */
             }
         }
     }
@@ -114,12 +166,23 @@ done:
     return rc;
 }
 
-/* Pick an output buffer large enough for the buffer default and one row. */
+/* Pick an output buffer that holds the default size and at least one burst. */
 static size_t
-wl_bufsize(size_t width)
+wl_bufsize(size_t burst)
 {
-    size_t need = width + 64;
+    size_t need = burst + 64;
     return need > WL_OUTBUF ? need : WL_OUTBUF;
+}
+
+/* Allocate a row template of `width` bytes plus copy slack, zero-padded. */
+static char *
+wl_alloc_row(size_t width)
+{
+    char *row = (char *) PyMem_Malloc(width + WL_SLACK);
+    if (row != NULL) {
+        memset(row + width, 0, WL_SLACK);
+    }
+    return row;
 }
 
 /*
@@ -151,8 +214,8 @@ py_write_words(PyObject *self, PyObject *args)
     }
 
     maxwidth = (size_t) maxlen + (size_t) dlen;
-    bufsize = wl_bufsize(maxwidth);
-    out = (char *) PyMem_Malloc(bufsize);
+    bufsize = wl_bufsize((size_t) k * maxwidth);
+    out = (char *) PyMem_Malloc(bufsize + WL_SLACK);
     if (out == NULL) {
         return PyErr_NoMemory();
     }
@@ -163,7 +226,7 @@ py_write_words(PyObject *self, PyObject *args)
         Py_ssize_t *varoff;
         Py_ssize_t i;
 
-        row = (char *) PyMem_Malloc(width > 0 ? width : 1);
+        row = wl_alloc_row(width);
         varoff = (Py_ssize_t *) PyMem_Malloc((size_t) cur * sizeof(Py_ssize_t));
         if (row == NULL || varoff == NULL) {
             PyMem_Free(row);
@@ -222,7 +285,7 @@ py_write_pattern(PyObject *self, PyObject *args)
     }
 
     width = (size_t) plen + (size_t) dlen;
-    row = (char *) PyMem_Malloc(width > 0 ? width : 1);
+    row = wl_alloc_row(width);
     varoff = (Py_ssize_t *) PyMem_Malloc((size_t) (plen > 0 ? plen : 1)
                                          * sizeof(Py_ssize_t));
     if (row == NULL || varoff == NULL) {
@@ -251,8 +314,8 @@ py_write_pattern(PyObject *self, PyObject *args)
         Py_RETURN_NONE;
     }
 
-    bufsize = wl_bufsize(width);
-    out = (char *) PyMem_Malloc(bufsize);
+    bufsize = wl_bufsize((size_t) k * width);
+    out = (char *) PyMem_Malloc(bufsize + WL_SLACK);
     if (out == NULL) {
         PyMem_Free(row);
         PyMem_Free(varoff);
