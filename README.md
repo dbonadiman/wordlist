@@ -59,6 +59,17 @@ and for tools that accept multiple dictionaries:
 
     $ wordlist a-z -M 6 -o out -s 4      # writes out.000 .. out.003
 
+Choose the separator after each word (default newline; backslash escapes
+are decoded, `''` means none):
+
+    $ wordlist abc -M 2 -d '\0' | xargs -0 ...   # NUL-separated
+    $ wordlist abc -M 2 -d ', '                  # ", "-separated
+
+Count how big a run would be, without generating it:
+
+    $ wordlist a-z0-9 -M 8 -c
+    2901713047668 words, 26115417429012 bytes (23.8 TiB)
+
 Print a summary (charset, lengths, word/byte count, timing) to stderr:
 
     $ wordlist a-z0-9 -M 8 -v -o list.txt

@@ -1,11 +1,23 @@
 #! /usr/bin/env python
 from __future__ import print_function
 
+import codecs
 import errno
 import os
+import re
 import sys
 import time
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
+
+# Recognised backslash escapes in --delimiter (so `-d '\t'` works without
+# needing the shell's $'...' quoting).  Anything else is left untouched,
+# so real (including non-ASCII) characters pass through unharmed.
+_ESCAPE_RE = re.compile(r"\\(?:[ntrfv0abe\\'\"]|x[0-9A-Fa-f]{2}|[0-7]{1,3})")
+
+
+def __decode_escapes(text):
+    return _ESCAPE_RE.sub(
+        lambda m: codecs.decode(m.group(0), 'unicode_escape'), text)
 
 
 def __get_parser(version):
@@ -27,6 +39,10 @@ def __get_parser(version):
                         help='maximum word length (default: charset length)')
     parser.add_argument('-o', '--out', metavar='FILE',
                         help='write to FILE instead of stdout')
+    parser.add_argument('-d', '--delimiter', default='\n', metavar='SEP',
+                        help=r"separator after each word (default '\n'); "
+                             r"backslash escapes like \t \0 \r are decoded, "
+                             "use '' for none")
     parser.add_argument('pattern', nargs='?',
                         help="pattern where each '@' is replaced by any "
                              "charset character (e.g. a@b@)")
@@ -67,8 +83,9 @@ def main():
     maxlen = args['max'] if args['max'] is not None else len(charset)
     verbose = args['verbose']
     shards = args['shards']
+    delimiter = __decode_escapes(args['delimiter'])
 
-    wrdlst = wordlist.Generator(charset, '\n')
+    wrdlst = wordlist.Generator(charset, delimiter)
 
     if not pattern and (minlen < 1 or maxlen < minlen):
         parser.error('length range must satisfy 1 <= --min <= --max '
